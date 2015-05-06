@@ -1,0 +1,4 @@
+These are mostly scripts that run on systems physically inside Bloominglabs. Usually these are things that get some direct or indirect interaction with physical human beings. Think home automation, but with dozens of people coming and going at all hours it makes it much more fun than stuff that runs alone in your empty house.
+
+Most of my stuff that watches the network uses the linksys_clients.sh script to query the DHCP table of our wrt54g router for active clients. This obviously doesn't count devices with static IP's, and most devices with a static IP we want to ignore anyway as it's probably not a transient device like a phone.
+
