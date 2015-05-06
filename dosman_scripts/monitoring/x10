@@ -1,0 +1,253 @@
+#!/bin/bash
+# 2-11-13 / dosman / An auto-power off system for X10 devices - allows any script to turn on the X10
+# devices in the space. System will automatically turn the devices off after $X10ACTIVE has not
+# been touched in $POWEROFF seconds (2 hours). Tracks powered on X10 devices separately.
+#
+# Eventually this can be replaced by a to-be-written scoring system which finds the space to be
+# no longer occupied.
+#
+##########################################################################################
+
+# Bottle Rocket for X10 control
+BR=`which br`
+AT=`which at`
+# We need the full path to this script so 'at' can find it
+x10="/home/dosman/x10"
+# Firecracker X10 module device
+X10TTY=/dev/serial/by-id/usb-FIDI_Usb_seial_converter_FTCUSA8R-if00-port0
+#X10TTY=/dev/ttyUSB0
+#X10TTY=/dev/x10
+# X10 device activity status / adds .[DEV] to the end so activity status for any device is possible
+X10ACTIVE=/tmp/x10active
+# For x10watcher, how often to recheck age of X10ACTIVE file in seconds
+X10INTERVAL=300
+# How long to wait after X10ACTIVE last touch to power off devices in seconds:
+POWEROFF=7200
+# Output log
+ERR=/var/log/x10.log
+# may not be needed any more
+RFIDLOG=
+
+##########################################################################################
+
+check_tty_perms() {
+# Verify this user has permissions to access TTY devices
+# Returns 0 if all is good, returns 1 if user not in the dialout group
+if [[ $USER == "root" ]];then
+        return
+else
+        grep $USER /etc/group | grep "^dialout" > /dev/null 2>&1
+        if [[ $? -gt 0 ]];then
+                echo "`date` - check_tty_perms() did not find $USER in /etc/groups, exiting since they can't access any tty devices " >> $ERR
+                return 1
+        fi
+fi
+}
+check_tty_perms
+if [[ $? -gt 0 ]];then
+	echo "Error: you must be in the dialout group to have tty access, aborting."
+	exit 5
+fi
+
+##########################################################################################
+
+command() {
+# Control X10 devices via a FireCracker serial module and the BottleRocket library/command
+typeset dev=$1
+typeset cmd=$2
+typeset RET
+if [[ -z $dev || -z $cmd ]];then
+	echo "`date` - x10() called and missing parameters (X10 device or command)" >> $ERR
+	return 1
+fi
+cmd=`echo $cmd | tr "[:lower:]" "[:upper:]"`
+dev=`echo $dev | tr "[:lower:]" "[:upper:]"`
+#if [[ $cmd == "on" || $cmd == "off" || $cmd == "dim" || $cmd == "bright" || $cmd == "all_on" || $cmd == "all_off" || $cmd == "lamps_on" || $cmd == "lamps_off" ]];then
+if [[ $cmd == "ON" ]];then
+	# br --port=/dev/ttyUSB2 A1 ON
+	$BR --port=${X10TTY} $dev $cmd
+	RET=$?
+	if [[ $RET -gt 0 ]];then
+		echo "`date` - $BR using device $X10TTY threw an error" >> $ERR
+	# I'm not sure how to handle all_off/lamps_off with the X10ACTIVE file checking - how can we know all devices to check on files for?
+	#elseif [[ $cmd == "off" || $cmd == "all_off" || $cmd == "lamps_off" ]];then
+	else
+		#if [[ -e ${X10ACTIVE}.$dev ]];then
+		#	touch ${X10ACTIVE}.$dev
+		#else
+		#	#GID=100 # users group
+		#	touch ${X10ACTIVE}.$dev
+		#	chgrp $GID ${X10ACTIVE}.$dev
+		#	chmod o+w ${X10ACTIVE}.$dev
+		#fi
+		touch ${X10ACTIVE}.$dev
+		chmod o+w ${X10ACTIVE}.$dev
+		$0 -x10watcher $dev
+	fi
+elif [[ $cmd == "OFF" ]];then
+	$BR --port=${X10TTY} $dev $cmd
+	if [[ $? -gt 0 ]];then
+		echo "`date` - x10() had error on rm ${ACTIVE}.$dev" >> $ERR
+		return 1
+	else
+		#sudo /usr/bin/rm -f ${X10ACTIVE}.$dev
+		/bin/rm -f ${X10ACTIVE}.$dev
+		if [[ $? -gt 0 ]];then
+			echo "`date` - command() attempted to rm ${X10ACTIVE}.$dev but had an error" >> $ERR
+		fi
+	fi
+else
+	echo "`date` - invalid br command \"${cmd}\" given to x10()" >> $ERR
+	return 1
+fi
+}
+
+
+####################################################
+# How long to wait after X10ACTIVE last touch in seconds:
+#POWEROFF=7200
+#X10ACTIVE=/tmp/x10active
+
+month_to_num() {
+typeset var1
+case $1 in
+        Jan) var1=01 ;;
+        Feb) var1=02 ;;
+        Mar) var1=03 ;;
+        Apr) var1=04 ;;
+        May) var1=05 ;;
+        Jun) var1=06 ;;
+        Jul) var1=07 ;;
+        Aug) var1=08 ;;
+        Sep) var1=09 ;;
+        Oct) var1=10 ;;
+        Nov) var1=11 ;;
+        Dec) var1=12 ;;
+        *) var1=01 ;;
+esac
+echo $var1
+}
+
+x10watcher() {
+# Launches background process to turn off x10 devices after POWEROFF time has passed without accessing device powered by X10 module
+typeset dev=$1
+if [[ -z $dev ]];then
+        echo "`date` - x10watcher() called and missing device parameter - scripting bug" >> $ERR
+        return 1
+fi
+dev=`echo $dev | tr "[:lower:]" "[:upper:]"`
+if [[ ! -e ${X10ACTIVE}.$dev ]];then
+	echo "`date` - x10watcher() running but $X10ACTIVE was not found - someone deleted it out from under us. Doing nothing." >> $ERR
+	return 5
+fi
+#
+typeset mytime=`date +%s`
+typeset locktime=`ls -l ${X10ACTIVE}.$dev | awk '{print $6" "$7" "$8}'`
+typeset lockmonth=`echo $locktime | awk '{print $1}'`
+typeset lockday=`echo $locktime | awk '{print $2}'`
+typeset lockhour=`echo $locktime | awk '{print $3}' | awk -F: '{print $1}'`
+typeset lockmin=`echo $locktime | awk '{print $3}' | awk -F: '{print $2}'`
+#echo "mytime = $mytime / locktime = $locktime / lockmonth = $lockmonth / lockday = $lockday / lockhour = $lockhour / lockmin = $lockmin"
+
+# sets var1 to num of month
+var1=`month_to_num $lockmonth`
+
+#echo "date --'`date +%Y`-${var1}-${lockmin} ${lockhour}:${lockmin}:00 EST '"
+# EST was throwing a date error
+#locktime="`date +%Y`-${var1}-${lockday} ${lockhour}:${lockmin}:00 EST "
+locktime="`date +%Y`-${var1}-${lockday} ${lockhour}:${lockmin}:00"
+#echo "date --date="${locktime}" +%s"
+locktime=`date --date="${locktime}" +%s`
+timediff=`expr $mytime - $locktime`
+#echo "mytime = $mytime / locktime = $locktime / timediff = $timediff / MAXLOCKTIME = $MAXLOCKTIME"
+# If lock is over MAXLOCKTIME (5mins) then remove the lock
+
+if [[ $timediff -gt $POWEROFF ]];then
+	$BR --port=${X10TTY} $dev off
+        if [[ $? -eq 0 ]];then
+                echo "`date` - x10watcher() powered off $dev after $timediff became greater than $POWEROFF" >> $ERR
+        else
+                echo "`date` - x10watcher() FAILED to power off $dev after $timediff became greater than $POWEROFF, error from $BR" >> $ERR
+        fi
+        #sudo /usr/bin/rm -f ${X10ACTIVE}.$dev
+        /bin/rm -f ${X10ACTIVE}.$dev
+	if [[ $? -gt 0 ]];then
+		echo "`date` - x10watcher() attempted to rm ${X10ACTIVE}.$dev but had an error" >> $ERR
+	fi
+else
+	# relaunch in x minutes with at
+	TMP1=/tmp/$$_x10watcher_at.tmp
+	echo "$0 -x10watcher $dev" > $TMP1
+	var2=`perl -e "print scalar localtime time + $X10INTERVAL" | awk '{print $2" "$3" "$4" "$5}'`
+
+	MM=`echo $var2 | awk '{print $1}'`
+	DD=`echo $var2 | awk '{print $2}'`
+	TT=`echo $var2 | awk '{print $3}'`
+	YY=`echo $var2 | awk '{print $NF}'`
+
+	# wc sees an extra char on each line
+	if [[ `echo $DD | wc -c` == 2 ]];then
+		DD=`echo "0$DD"`
+	fi
+
+	TT=`echo $TT | awk -F: '{print $1 $2}'`
+	MM=`month_to_num $MM`
+	#echo "`date` - debuging: MM $MM / DD $DD / TT $TT / YY $YY" >> $ERR
+	# at time syntax: [[CC]YY]MMDDhhmm[.ss]
+        #echo "$AT -t \"${YY}${MM}${DD}${TT}\" -f $TMP1 -M"
+        $AT -t "${YY}${MM}${DD}${TT}" -f $TMP1 -M
+	/bin/rm -f $TMP1
+fi
+}
+
+state() {
+# Check and report the state of the x10 watcher
+if [[ $USER != "root" ]];then
+	echo "You are not root so you may not see other users x10watcher jobs if they exist"
+fi
+echo "TTY is $X10TTY"
+/usr/bin/atq
+ls -l /tmp/x10active.*
+}
+
+touchthem() {
+# Touch all x10active files to keep devices from being powered off by the background watcher
+#echo "X10ACTIVE $X10ACTIVE"
+if [[ $USER != root ]];then
+	echo "You are not root so this may possibly fail - re-run as root if it errors."
+fi
+for file in `ls -1 ${X10ACTIVE}.*`;do
+	touch $file
+	if [[ $? -eq 0 && $USER == "root" ]];then
+		chmod o+w $file
+	elif [[ $? -gt 0 ]];then
+		echo "`date` - touchthem() unable to touch $file, most likely because of a permissions problem" | tee -a $ERR
+		exit 1
+	fi
+done
+}
+
+case $1
+in
+        -c)                     command $2 $3 ; exit $?;;
+        -x10watcher)            x10watcher $2 ; exit $?;;
+        -state)            	state ;;
+        -touch)			touchthem ;;
+        *)                      echo "When used to power on an X10 device, launches a background watcher which auto-powers off the"
+				echo "device when /tmp/x10.active.[device] hasn't been touched in a set period of time (usually 2 hours)."
+				echo "This is most useful on serially-attached devices which we want powered off when the space is unoccupied."
+				echo ""
+				echo "Useage: $0 -c [DEV] [on|off]"
+                                echo "        $0 -x10watcher [DEV]"
+                                echo "        Usually -x10watcher is only called by $0 itself"
+				echo ""
+                                echo "        $0 -state"
+				echo "	      This shows the state of the x10 system, what \"at\" jobs are running, /tmp/x10active files, etc."
+				echo ""
+                                echo "        $0 -touch"
+				echo "	      Touches all ${X10ACTIVE}.* files to prevent the x10watcher from powering things off yet"
+				echo ""
+				echo "Informational and error output sent to /var/log/x10.log"
+                                exit
+                                ;;
+esac
